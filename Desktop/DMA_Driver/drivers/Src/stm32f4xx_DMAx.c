@@ -183,6 +183,21 @@ static uint8_t DMA_SetupStream(DMA_Handle_t *pDMAHandle,uint32_t src_addr,uint32
 	uint32_t p_size  = size_bytes[pDMAHandle->DMA_Config.PeriphDataSize];
 	uint8_t direction = pDMAHandle->DMA_Config.Directionx;
 
+	// 1. Alignment checks FIRST — before touching any hardware registers
+	if (direction == DMA_DIR_M2P || direction == DMA_DIR_M2M) {
+		if ((src_addr % m_size) != 0) return INIT_FAULT;
+		if ((dest_addr % p_size) != 0) return INIT_FAULT;
+	} else {
+		if ((src_addr % p_size) != 0) return INIT_FAULT;
+		if ((dest_addr % m_size) != 0) return INIT_FAULT;
+	}
+
+	uint32_t p_burst = burst_beats[pDMAHandle->DMA_Config.PeriphBurst];
+	if (p_burst > 1) {
+		if ((length % p_burst) != 0) return INIT_FAULT;
+	}
+
+	// 2. Now write addresses to hardware (alignment is guaranteed valid)
 	if (direction == DMA_DIR_P2M) {
 		pDMAHandle->pDMA_Stream->PAR  = src_addr;
 		pDMAHandle->pDMA_Stream->M0AR = dest_addr;
@@ -196,35 +211,14 @@ static uint8_t DMA_SetupStream(DMA_Handle_t *pDMAHandle,uint32_t src_addr,uint32
 		pDMAHandle->pDMA_Stream->M0AR = dest_addr;
 	}
 
-	// 2. Handle Double Buffer Mode safely using Bitwise AND (&)
-	if (pDMAHandle->pDMA_Stream->CR & (1 << DMA_SxCR_DBM)) {
+	// 3. Handle Double Buffer Mode
+	if (pDMAHandle->DMA_Config.DoubleBufferMode) {
 		pDMAHandle->pDMA_Stream->M1AR = memory2_addr;
 	}
-	//aligment checking for the burst
-	if (direction == DMA_DIR_M2P || direction == DMA_DIR_M2M) {
-		if ((src_addr % m_size) != 0) return INIT_FAULT;
-		if ((dest_addr % p_size) != 0) return INIT_FAULT;
-	}else{
-		if ((src_addr % p_size) != 0) return INIT_FAULT;
-		if ((dest_addr % m_size) != 0) return INIT_FAULT;
 
-	}
-	uint32_t p_burst = burst_beats[pDMAHandle->DMA_Config.PeriphBurst];
-
-	if (p_burst > 1) {
-		if ((length % p_burst) != 0) {
-			return INIT_FAULT;
-		}
-	}
-
-	if(pDMAHandle->pDMA_Stream->CR & (1 << DMA_SxCR_CIRC)){
-
-
-
-		// The Rule: (Length * PSize) must be a multiple of (Burst * MSize)
-		// We avoid division entirely by checking:
-		// (Length * PSize) % (MBurst * MSize) == 0
-
+	// 4. Set NDTR — use config struct (not hardware CR) for circular mode check
+	if (pDMAHandle->DMA_Config.NorCircMode == DMA_MODE_CIRCULAR) {
+		// The Rule: (Length * PSize) must be a multiple of (MBurst * MSize)
 		uint32_t required_alignment = m_burst * m_size;
 		uint32_t total_transfer_bytes = length * p_size;
 
@@ -233,7 +227,7 @@ static uint8_t DMA_SetupStream(DMA_Handle_t *pDMAHandle,uint32_t src_addr,uint32
 		} else {
 			return INIT_FAULT; // Alignment constraint violated!
 		}
-	}else{
+	} else {
 		pDMAHandle->pDMA_Stream->NDTR = length;
 	}
 
@@ -250,24 +244,21 @@ static uint8_t DMA_SetupStream(DMA_Handle_t *pDMAHandle,uint32_t src_addr,uint32
 }
 
 uint8_t DMA_StartTransfer(DMA_Handle_t *pDMAHandle,uint32_t src_addr,uint32_t dest_addr,uint32_t memory2_addr,uint32_t length){
-	if (!DMA_SetupStream(pDMAHandle, src_addr, dest_addr, memory2_addr, length)) return INIT_FAULT;
-	   	    pDMAHandle->pDMA_Stream->CR |= (1 << DMA_SxCR_EN);
-return INIT_OK;
-
+	if (DMA_SetupStream(pDMAHandle, src_addr, dest_addr, memory2_addr, length) != INIT_OK) return INIT_FAULT;
+	pDMAHandle->pDMA_Stream->CR |= (1 << DMA_SxCR_EN);
+	return INIT_OK;
 }
+
 uint8_t DMA_StartTransfer_IT(DMA_Handle_t *pDMAHandle, uint32_t src_addr, uint32_t dest_addr,uint32_t memory2_addr, uint32_t length){
-	if (!DMA_SetupStream(pDMAHandle, src_addr, dest_addr, memory2_addr, length)) return INIT_FAULT;
+	if (DMA_SetupStream(pDMAHandle, src_addr, dest_addr, memory2_addr, length) != INIT_OK) return INIT_FAULT;
 
-
-
-       pDMAHandle->pDMA_Stream->CR |= (1 << DMA_SxCR_DMEIE) | (1 << DMA_SxCR_TCIE) |
-                                           (1 << DMA_SxCR_HTIE) | (1 << DMA_SxCR_TEIE);
-       if(pDMAHandle->DMA_Config.FIFOMode == DMA_FIFO_ENABLE){
-    	   pDMAHandle->pDMA_Stream->FCR |= (1 << DMA_SxFCR_FEIE);
-       }
-       //handling the interrupt part;
-	    pDMAHandle->pDMA_Stream->CR |= (1 << DMA_SxCR_EN);
-   return INIT_OK;
+	pDMAHandle->pDMA_Stream->CR |= (1 << DMA_SxCR_DMEIE) | (1 << DMA_SxCR_TCIE) |
+	                               (1 << DMA_SxCR_HTIE)  | (1 << DMA_SxCR_TEIE);
+	if(pDMAHandle->DMA_Config.FIFOMode == DMA_FIFO_ENABLE){
+		pDMAHandle->pDMA_Stream->FCR |= (1 << DMA_SxFCR_FEIE);
+	}
+	pDMAHandle->pDMA_Stream->CR |= (1 << DMA_SxCR_EN);
+	return INIT_OK;
 }
 
 void DMA_IRQHandling(DMA_Handle_t *pDMAHandle){
@@ -284,56 +275,59 @@ void DMA_IRQHandling(DMA_Handle_t *pDMAHandle){
 	uint8_t HTIFx  = base_bit + 4;
 	uint8_t TCIFx  = base_bit + 5;
 
+	uint32_t CR  = pDMAHandle->pDMA_Stream->CR;
+	uint32_t FCR = pDMAHandle->pDMA_Stream->FCR;
+
 	// 3. Handle Streams 0 to 3 (Low Registers)
 	if (streamNumber <= 3) {
+		uint32_t ISR = pDMAHandle->DMAx->LISR;
 
-	    if (pDMAHandle->DMAx->LISR & (1 << FEIFx)) {
-	        pDMAHandle->DMAx->LIFCR = (1 << FEIFx); // Write 1 to clear!
+	    if ((ISR & (1 << FEIFx))  && (FCR & (1 << DMA_SxFCR_FEIE))) {
+	        pDMAHandle->DMAx->LIFCR = (1 << FEIFx);
 	        DMA_ApplicationEventCallback(pDMAHandle, DMA_OVUN_FEIF);
 	    }
-	    if (pDMAHandle->DMAx->LISR & (1 << DMEIFx)) {
+	    if ((ISR & (1 << DMEIFx)) && (CR & (1 << DMA_SxCR_DMEIE))) {
 	        pDMAHandle->DMAx->LIFCR = (1 << DMEIFx);
 	        DMA_ApplicationEventCallback(pDMAHandle, DMA_MERRROR_DMEIF);
 	    }
-	    if (pDMAHandle->DMAx->LISR & (1 << TEIFx)) {
+	    if ((ISR & (1 << TEIFx))  && (CR & (1 << DMA_SxCR_TEIE))) {
 	        pDMAHandle->DMAx->LIFCR = (1 << TEIFx);
 	        DMA_ApplicationEventCallback(pDMAHandle, DMA_ERROR_TEIF);
 	    }
-	    if (pDMAHandle->DMAx->LISR & (1 << HTIFx)) {
+	    if ((ISR & (1 << HTIFx))  && (CR & (1 << DMA_SxCR_HTIE))) {
 	        pDMAHandle->DMAx->LIFCR = (1 << HTIFx);
 	        DMA_ApplicationEventCallback(pDMAHandle, DMA_HALFTRANS_HTIF);
 	    }
-	    if (pDMAHandle->DMAx->LISR & (1 << TCIFx)) {
+	    if ((ISR & (1 << TCIFx))  && (CR & (1 << DMA_SxCR_TCIE))) {
 	        pDMAHandle->DMAx->LIFCR = (1 << TCIFx);
 	        DMA_ApplicationEventCallback(pDMAHandle, DMA_COMPLETE_TCIF);
 	    }
-
 	}
 	// 4. Handle Streams 4 to 7 (High Registers)
 	else {
+		uint32_t ISR = pDMAHandle->DMAx->HISR;
 
-	    if (pDMAHandle->DMAx->HISR & (1 << FEIFx)) {
+	    if ((ISR & (1 << FEIFx))  && (FCR & (1 << DMA_SxFCR_FEIE))) {
 	        pDMAHandle->DMAx->HIFCR = (1 << FEIFx);
 	        DMA_ApplicationEventCallback(pDMAHandle, DMA_OVUN_FEIF);
 	    }
-	    if (pDMAHandle->DMAx->HISR & (1 << DMEIFx)) {
+	    if ((ISR & (1 << DMEIFx)) && (CR & (1 << DMA_SxCR_DMEIE))) {
 	        pDMAHandle->DMAx->HIFCR = (1 << DMEIFx);
 	        DMA_ApplicationEventCallback(pDMAHandle, DMA_MERRROR_DMEIF);
 	    }
-	    if (pDMAHandle->DMAx->HISR & (1 << TEIFx)) {
+	    if ((ISR & (1 << TEIFx))  && (CR & (1 << DMA_SxCR_TEIE))) {
 	        pDMAHandle->DMAx->HIFCR = (1 << TEIFx);
 	        DMA_ApplicationEventCallback(pDMAHandle, DMA_ERROR_TEIF);
 	    }
-	    if (pDMAHandle->DMAx->HISR & (1 << HTIFx)) {
+	    if ((ISR & (1 << HTIFx))  && (CR & (1 << DMA_SxCR_HTIE))) {
 	        pDMAHandle->DMAx->HIFCR = (1 << HTIFx);
 	        DMA_ApplicationEventCallback(pDMAHandle, DMA_HALFTRANS_HTIF);
 	    }
-	    if (pDMAHandle->DMAx->HISR & (1 << TCIFx)) {
+	    if ((ISR & (1 << TCIFx))  && (CR & (1 << DMA_SxCR_TCIE))) {
 	        pDMAHandle->DMAx->HIFCR = (1 << TCIFx);
 	        DMA_ApplicationEventCallback(pDMAHandle, DMA_COMPLETE_TCIF);
 	    }
 	}
-
 }
 /*********************************************************************
  * @fn      		  - DMA_InterruptConfig

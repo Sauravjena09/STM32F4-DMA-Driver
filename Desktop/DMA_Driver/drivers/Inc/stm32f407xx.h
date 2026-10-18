@@ -295,8 +295,8 @@ typedef struct {
 #define UART5_PCLK_DI()   (RCC->APB1ENR &= ~(1 << 20))
 #define USART6_PCLK_DI()  (RCC->APB2ENR &= ~(1 << 5))
 //CLOCK ENABLE FOR THE DMAx Peripherals
-#define DMA1_PCLK_DI()      (RCC->AHB1ENR |= ~(1<<21))
-#define DMA2_PCLK_DI()      (RCC->AHB1ENR |= ~(1<<22))
+#define DMA1_PCLK_DI()      (RCC->AHB1ENR &= ~(1<<21))
+#define DMA2_PCLK_DI()      (RCC->AHB1ENR &= ~(1<<22))
 
 #define USART1  			((USART_RegDef_t*)USART1_BASEADDR)
 #define USART2  			((USART_RegDef_t*)USART2_BASEADDR)
